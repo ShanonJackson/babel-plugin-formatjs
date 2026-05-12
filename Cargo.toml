@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/swc-plugin-formatjs"]
+
+# NOTE: profile.release intentionally left as cargo default. Setting LTO at
+# the workspace level propagates to proc-macro dep builds and produces
+# `lto cannot be used for proc-macro crate type` errors. If/when we want
+# size-optimized wasm output, configure it per-crate or via build.rs.

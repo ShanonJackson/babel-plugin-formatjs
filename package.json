@@ -1,0 +1,19 @@
+{
+  "name": "babel-plugin-formatjs-parity",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Parity harness comparing babel-plugin-formatjs@10.5.41 against a Rust/SWC reimplementation.",
+  "scripts": {
+    "transform:babel": "node scripts/run-babel.mjs",
+    "transform:swc": "node scripts/run-swc.mjs",
+    "diff": "node scripts/diff.mjs",
+    "test:parity": "node scripts/parity.mjs"
+  },
+  "dependencies": {
+    "babel-plugin-formatjs": "10.5.41",
+    "@babel/core": "^7.26.10"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.10.0"
+  }
+}

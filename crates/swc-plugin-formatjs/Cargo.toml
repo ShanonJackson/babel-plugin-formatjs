@@ -1,0 +1,47 @@
+[package]
+name = "swc-plugin-formatjs"
+version = "0.0.1"
+edition = "2021"
+description = "Rust/SWC port of babel-plugin-formatjs@10.5.41. Supports WASI plugin and native VisitMut consumption."
+license = "MIT"
+
+# `cdylib` is required for the WASI plugin .wasm artifact.
+# `rlib`   is required so other Rust crates (native @swc/core embedders) can `use` the visitor.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Default to native so `cargo check` / `cargo test` on the host platform Just Works.
+default = ["native"]
+
+# Native mode: expose `formatjs(config)` as a `VisitMut` for embedders that link
+# this crate as a normal Rust dependency (e.g. a custom @swc/core native build).
+native = []
+
+# Plugin mode: emit the `__plugin_process_impl` symbol expected by the SWC
+# WASI plugin host. Build with: `cargo build --release --target wasm32-wasip1 --features plugin --no-default-features`.
+plugin = ["swc_core/ecma_plugin_transform"]
+
+[dependencies]
+swc_core = { version = "=54.0.0", features = [
+    "ecma_ast",
+    "ecma_visit",
+    "common",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pinned because they're load-bearing for hash parity with babel's
+# `crypto.createHash('sha512').digest('base64').slice(0, N)`. Bumping these
+# is a behavior change — re-run the parity harness if you do.
+sha2 = "=0.10.8"
+base64 = "=0.22.1"
+regex = "=1.11.1"
+
+[dev-dependencies]
+swc_core = { version = "=54.0.0", features = [
+    "ecma_ast",
+    "ecma_visit",
+    "ecma_parser",
+    "ecma_codegen",
+    "common",
+] }

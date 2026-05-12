@@ -1,0 +1,4 @@
+{
+  "idInterpolationPattern": "[name]-[sha512:contenthash:base64:6]",
+  "expectError": "idInterpolationPattern token"
+}

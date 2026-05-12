@@ -1,0 +1,11 @@
+node_modules/
+target/
+dist/
+*.log
+.DS_Store
+package-lock.json
+Cargo.lock
+.idea/
+fixtures/**/out-babel.*
+fixtures/**/out-swc.*
+fixtures/**/out-babel-normalized.*
