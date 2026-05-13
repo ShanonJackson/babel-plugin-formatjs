@@ -624,15 +624,17 @@ fn callee_ident_name(e: &Expr) -> Option<(String, bool)> {
         Expr::Ident(id) => Some((id.sym.to_string(), false)),
         Expr::Member(m) => match &m.prop {
             MemberProp::Ident(id) => Some((id.sym.to_string(), true)),
-            // computed `intl[fnName](...)` — we can't tell statically.
-            // Babel can't either unless `path.evaluate()` succeeds. To be
-            // safe in a 90 GB monorepo we error.
-            MemberProp::Computed(c) => fail(
-                c.span,
-                "computed member callee (`obj[expr](...)`) is not supported when matching \
-                 formatMessage-like functions — use `obj.formatMessage(...)` or add the \
-                 dynamic name to `additionalFunctionNames`",
-            ),
+            // Computed `obj[expr](...)`. Babel's matcher is
+            // `property.isIdentifier({name})` — it returns true ONLY when
+            // the computed expression is a bare `Identifier` node whose
+            // `.name` matches a configured function name. String literals
+            // (`obj["formatMessage"]`) and complex expressions (`obj[fn()]`)
+            // return false, and babel SILENTLY does not extract from them
+            // (no error). Match that exactly.
+            MemberProp::Computed(c) => match &*c.expr {
+                Expr::Ident(id) => Some((id.sym.to_string(), true)),
+                _ => None,
+            },
             MemberProp::PrivateName(_) => None,
         },
         _ => None,

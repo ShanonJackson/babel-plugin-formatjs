@@ -1,9 +1,11 @@
 [package]
 name = "swc-plugin-formatjs"
-# Lock-stepped with the upstream `babel-plugin-formatjs` version we port from.
-# Bumping this crate independently is a parity-tracking lie — only move it
-# when re-porting from a new `babel-plugin-formatjs` release (see CLAUDE.md).
-version = "10.5.41"
+# MAJOR.MINOR mirror the upstream `babel-plugin-formatjs` version we port from.
+# PATCH is *not* lock-stepped — it carries Rust-side fixes ON TOP of a given
+# babel port. Convention: <babelPatch><ourFix> as one integer, so the next
+# babel patch can step over it (e.g. babel 10.5.42 → us 10.5.42 or 10.5.421+).
+# See CLAUDE.md for the upgrade workflow.
+version = "10.5.421"
 edition = "2021"
 description = "Rust/SWC port of babel-plugin-formatjs@10.5.41. Supports WASI plugin and native VisitMut consumption."
 license = "MIT"
