@@ -136,6 +136,15 @@ pub fn formatjs(config: Config) -> FormatJsTransform {
     FormatJsTransform::new(config)
 }
 
+/// Convenience wrapper that returns the transform as `impl Pass`, ready to
+/// drop into `swc::Compiler::process_js_with_custom_pass` without the
+/// caller having to import `swc_core::ecma::visit::visit_mut_pass` themselves.
+///
+/// Equivalent to: `swc_core::ecma::visit::visit_mut_pass(formatjs(config))`.
+pub fn formatjs_pass(config: Config) -> impl swc_core::ecma::ast::Pass {
+    swc_core::ecma::visit::visit_mut_pass(formatjs(config))
+}
+
 impl VisitMut for FormatJsTransform {
     fn visit_mut_call_expr(&mut self, n: &mut CallExpr) {
         n.visit_mut_children_with(self);

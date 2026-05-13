@@ -1,9 +1,20 @@
 [package]
 name = "swc-plugin-formatjs"
-version = "0.0.1"
+# Lock-stepped with the upstream `babel-plugin-formatjs` version we port from.
+# Bumping this crate independently is a parity-tracking lie — only move it
+# when re-porting from a new `babel-plugin-formatjs` release (see CLAUDE.md).
+version = "10.5.41"
 edition = "2021"
 description = "Rust/SWC port of babel-plugin-formatjs@10.5.41. Supports WASI plugin and native VisitMut consumption."
 license = "MIT"
+repository = "https://github.com/ShanonJackson/babel-plugin-formatjs"
+homepage = "https://github.com/ShanonJackson/babel-plugin-formatjs"
+readme = "README.md"
+keywords = ["swc", "swc-plugin", "formatjs", "react-intl", "i18n"]
+categories = ["development-tools", "internationalization", "wasm"]
+# Limit what gets shipped to crates.io — avoid bundling node_modules, fixtures,
+# target/, etc. when this is cargo-published from the workspace root.
+include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE*"]
 
 # `cdylib` is required for the WASI plugin .wasm artifact.
 # `rlib`   is required so other Rust crates (native @swc/core embedders) can `use` the visitor.
@@ -45,3 +56,8 @@ swc_core = { version = "=54.0.0", features = [
     "ecma_codegen",
     "common",
 ] }
+# Integration test exercises the same `process_js_with_custom_pass` path
+# downstream consumers will use. swc 52.0.0 is the high-level crate paired
+# with swc_core 54.0.0 — they share swc_ecma_ast 19 / swc_common 18.0.1.
+# Pinning is load-bearing for the same reason swc_core is pinned.
+swc = "=52.0.0"
