@@ -9,3 +9,6 @@ Cargo.lock
 fixtures/**/out-babel.*
 fixtures/**/out-swc.*
 fixtures/**/out-babel-normalized.*
+.swc
+.swc/*
+
