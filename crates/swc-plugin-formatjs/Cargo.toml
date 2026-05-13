@@ -5,7 +5,7 @@ name = "swc-plugin-formatjs"
 # babel port. Convention: <babelPatch><ourFix> as one integer, so the next
 # babel patch can step over it (e.g. babel 10.5.42 → us 10.5.42 or 10.5.421+).
 # See CLAUDE.md for the upgrade workflow.
-version = "10.5.422"
+version = "10.5.423"
 edition = "2021"
 description = "Rust/SWC port of babel-plugin-formatjs@10.5.41. Supports WASI plugin and native VisitMut consumption."
 license = "MIT"

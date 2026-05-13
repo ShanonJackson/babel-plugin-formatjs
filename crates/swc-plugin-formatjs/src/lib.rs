@@ -21,11 +21,13 @@
 //! See `CLAUDE.md` for the parity bar.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use serde::Deserialize;
 use swc_core::common::errors::HANDLER;
 use swc_core::common::{Span, Spanned, DUMMY_SP};
 use swc_core::ecma::ast::*;
+use swc_core::ecma::atoms::Atom;
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 
 thread_local! {
@@ -121,6 +123,17 @@ pub struct FormatJsTransform {
     config: Config,
     component_names: Vec<String>,
     function_names: Vec<String>,
+    /// Module-level `const NAME = <string-foldable>` bindings, populated
+    /// in `visit_mut_module` / `visit_mut_script` before any
+    /// formatMessage/JSX visitation. Used by the recursive string folder
+    /// to resolve bare identifier references in `id` / `defaultMessage` /
+    /// `description` values to the literal string babel's `path.evaluate()`
+    /// would fold them to.
+    ///
+    /// Function-local / block-scoped consts are intentionally NOT
+    /// collected — that would require a full scope subsystem. Hits on
+    /// function-local patterns continue to hard-error.
+    module_consts: HashMap<Atom, String>,
 }
 
 impl FormatJsTransform {
@@ -172,6 +185,7 @@ impl FormatJsTransform {
             config,
             component_names,
             function_names,
+            module_consts: HashMap::new(),
         }
     }
 }
@@ -190,6 +204,19 @@ pub fn formatjs_pass(config: Config) -> impl swc_core::ecma::ast::Pass {
 }
 
 impl VisitMut for FormatJsTransform {
+    fn visit_mut_module(&mut self, n: &mut Module) {
+        // Pre-pass: collect module-level `const X = <foldable>` bindings
+        // BEFORE descending into call/JSX sites so the folder can resolve
+        // identifier references when it gets there.
+        self.module_consts = collect_module_consts(&n.body);
+        n.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_script(&mut self, n: &mut Script) {
+        self.module_consts = collect_script_consts(&n.body);
+        n.visit_mut_children_with(self);
+    }
+
     fn visit_mut_call_expr(&mut self, n: &mut CallExpr) {
         n.visit_mut_children_with(self);
         self.handle_call_expr(n);
@@ -199,6 +226,113 @@ impl VisitMut for FormatJsTransform {
         n.visit_mut_children_with(self);
         self.handle_jsx_opening(n);
     }
+}
+
+// =====================================================================
+// Module-level const string folding (Option 1 evaluator).
+//
+// Coverage: top-level `const NAME = <foldable>` where <foldable> is any
+// combination of string literals, no-substitution template literals,
+// `+`-concat of two foldable string operands, template literals with
+// `${expr}` where every interpolated expr folds, identifier references
+// to previously-declared module-level consts, parenthesised expressions,
+// and TS wrapper expressions.
+//
+// Anything that does not fold leaves the binding out of the table — any
+// later reference to it falls through to the existing hard-error path.
+// =====================================================================
+
+fn collect_module_consts(items: &[ModuleItem]) -> HashMap<Atom, String> {
+    let mut table = HashMap::new();
+    for item in items {
+        let var_decl = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(v))) if v.kind == VarDeclKind::Const => v,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(e)) => match &e.decl {
+                Decl::Var(v) if v.kind == VarDeclKind::Const => v,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        collect_consts_from_var_decl(var_decl, &mut table);
+    }
+    table
+}
+
+fn collect_script_consts(items: &[Stmt]) -> HashMap<Atom, String> {
+    let mut table = HashMap::new();
+    for item in items {
+        if let Stmt::Decl(Decl::Var(v)) = item {
+            if v.kind == VarDeclKind::Const {
+                collect_consts_from_var_decl(v, &mut table);
+            }
+        }
+    }
+    table
+}
+
+fn collect_consts_from_var_decl(v: &VarDecl, table: &mut HashMap<Atom, String>) {
+    for decl in &v.decls {
+        // Only bare-identifier `const X = <expr>`. Destructuring patterns
+        // (`const { X } = obj`, `const [X] = arr`) are out of scope for
+        // Option 1 — they'd need object/array folding.
+        let Pat::Ident(name) = &decl.name else { continue };
+        let Some(init) = &decl.init else { continue };
+        if let Some(s) = fold_string_with(init, table) {
+            table.insert(name.id.sym.clone(), s);
+        }
+    }
+}
+
+/// Recursive string folder. Mirrors the subset of babel's `path.evaluate()`
+/// that produces string-typed results from string-typed inputs only.
+///
+/// Returns `Some(folded)` when every sub-expression resolves to a string;
+/// `None` otherwise (so the caller can hard-error with a helpful message).
+fn fold_string_with(e: &Expr, consts: &HashMap<Atom, String>) -> Option<String> {
+    let e = unwrap_ts(e);
+    match e {
+        Expr::Lit(Lit::Str(s)) => Some(s.value.to_atom_lossy().to_string()),
+
+        // Template literal — two cases:
+        //   (a) no substitutions: `foo bar`        → cooked of the single quasi
+        //   (b) `${expr}` substitutions:           → interleave quasis with folded exprs
+        Expr::Tpl(t) => fold_template(t, consts),
+
+        // `'a' + 'b'` — both sides must fold to strings. Number-to-string
+        // coercion is intentionally NOT supported (JS's `String(n)`
+        // semantics — NaN, Infinity, float printing — would diverge from
+        // babel without careful handling).
+        Expr::Bin(b) if matches!(b.op, BinaryOp::Add) => {
+            let left = fold_string_with(&b.left, consts)?;
+            let right = fold_string_with(&b.right, consts)?;
+            Some(format!("{}{}", left, right))
+        }
+
+        // Identifier — look up in the module-const table.
+        Expr::Ident(id) => consts.get(&id.sym).cloned(),
+
+        // Parenthesised: unwrap.
+        Expr::Paren(p) => fold_string_with(&p.expr, consts),
+
+        _ => None,
+    }
+}
+
+fn fold_template(t: &Tpl, consts: &HashMap<Atom, String>) -> Option<String> {
+    // Invariant from the spec: `quasis.len() == exprs.len() + 1`.
+    if t.quasis.len() != t.exprs.len() + 1 {
+        return None;
+    }
+    let mut out = String::new();
+    for (i, q) in t.quasis.iter().enumerate() {
+        let cooked = q.cooked.as_ref()?;
+        out.push_str(&cooked.to_atom_lossy().to_string());
+        if i < t.exprs.len() {
+            let folded = fold_string_with(&t.exprs[i], consts)?;
+            out.push_str(&folded);
+        }
+    }
+    Some(out)
 }
 
 // =====================================================================
@@ -324,7 +458,7 @@ impl FormatJsTransform {
                     Prop::KeyValue(kv) => {
                         let key = require_static_key(&kv.key);
                         if is_descriptor_key(&key) {
-                            let val = require_static_string(&kv.value, &key);
+                            let val = self.require_static_string(&kv.value, &key);
                             match key.as_str() {
                                 "id" => {
                                     has_id_prop = true;
@@ -513,13 +647,15 @@ impl FormatJsTransform {
                 ),
                 Some(JSXAttrValue::Str(s)) => s.value.to_atom_lossy().to_string(),
                 Some(JSXAttrValue::JSXExprContainer(c)) => match &c.expr {
-                    JSXExpr::Expr(e) => static_string(e).unwrap_or_else(|| {
+                    JSXExpr::Expr(e) => self.fold_string(e).unwrap_or_else(|| {
                         fail(
                             c.span,
                             format!(
                                 "`{}` JSX attribute must be a string literal — got a {}. \
-                                 Constant folding (string concatenation, identifier references) is not \
-                                 supported by this Rust port; inline the literal or extend the plugin.",
+                                 Module-level `const NAME = <literal>` references DO fold; \
+                                 function-local consts, function calls, member access, and \
+                                 cross-module imports do NOT. Inline the literal or hoist the \
+                                 const to module scope.",
                                 name_str,
                                 expr_kind(e)
                             ),
@@ -627,9 +763,14 @@ impl FormatJsTransform {
                 let JSXAttrName::Ident(id) = &a.name else { return true };
                 id.sym != "defaultMessage"
             });
-        } else if let Some(msg) = &normalized_msg {
-            replace_jsx_attr_value(n, "defaultMessage", string_jsx_value(msg));
         }
+        // NOTE: Unlike the call-expression visitor, babel's JSX visitor
+        // does NOT rewrite the `defaultMessage` attribute to the normalized
+        // string. It only touches the attribute under `removeDefaultMessage`
+        // or `ast: true` (unsupported here). For the default path the
+        // original attribute expression (`={M}`, `="raw  string"`, etc.)
+        // is left intact — runtime sees the source-form value.
+        let _ = &normalized_msg;
     }
 }
 
@@ -715,19 +856,30 @@ fn prop_name_as_str(name: &PropName) -> Option<String> {
     }
 }
 
-fn require_static_string(e: &Expr, key: &str) -> String {
-    static_string(e).unwrap_or_else(|| {
-        fail(
-            e.span(),
-            format!(
-                "`{}` in a message descriptor must be a string literal — got a {}. \
-                 Constant folding (e.g. `'a' + b`, identifier references, ternaries) is not \
-                 supported by this Rust port; inline the literal or extend the plugin.",
-                key,
-                expr_kind(e)
-            ),
-        )
-    })
+impl FormatJsTransform {
+    /// Fold an expression to a literal string using the module-const table.
+    /// Returns `None` if the expression can't be folded — the caller then
+    /// hard-errors with `require_static_string`.
+    fn fold_string(&self, e: &Expr) -> Option<String> {
+        fold_string_with(e, &self.module_consts)
+    }
+
+    fn require_static_string(&self, e: &Expr, key: &str) -> String {
+        self.fold_string(e).unwrap_or_else(|| {
+            fail(
+                e.span(),
+                format!(
+                    "`{}` in a message descriptor must be a string literal — got a {}. \
+                     Module-level `const NAME = <literal>` references DO fold (Option 1 \
+                     evaluator); function-local consts, function calls, member access, and \
+                     cross-module imports do NOT. Inline the literal at the call site or \
+                     hoist the const to module scope.",
+                    key,
+                    expr_kind(e)
+                ),
+            )
+        })
+    }
 }
 
 fn unwrap_ts(e: &Expr) -> &Expr {
@@ -768,18 +920,6 @@ fn unwrap_ts_mut(mut e: &mut Expr) -> &mut Expr {
     }
 }
 
-fn static_string(e: &Expr) -> Option<String> {
-    let e = unwrap_ts(e);
-    match e {
-        Expr::Lit(Lit::Str(s)) => Some(s.value.to_atom_lossy().to_string()),
-        // No-substitution template literal: `foo bar` (no ${} interpolations).
-        Expr::Tpl(t) if t.exprs.is_empty() && t.quasis.len() == 1 => t.quasis[0]
-            .cooked
-            .as_ref()
-            .map(|c| c.to_atom_lossy().to_string()),
-        _ => None,
-    }
-}
 
 /// Human-friendly description of an expression's shape — used in error
 /// messages so the developer can see exactly why their code wasn't accepted.
