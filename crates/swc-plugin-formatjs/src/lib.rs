@@ -20,11 +20,45 @@
 //!
 //! See `CLAUDE.md` for the parity bar.
 
+use std::cell::RefCell;
+
 use serde::Deserialize;
 use swc_core::common::errors::HANDLER;
 use swc_core::common::{Span, Spanned, DUMMY_SP};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
+
+thread_local! {
+    /// Filename of the file currently being transformed. Read by [`fail`]
+    /// so panic messages include "(path/to/file.tsx)" — critical for
+    /// diagnosing CI failures across a large monorepo where the same
+    /// pattern shows up in hundreds of locations.
+    ///
+    /// Populated by the WASI plugin entry point from
+    /// `TransformPluginMetadataContextKind::Filename`. Native callers can
+    /// set it via [`with_current_file`].
+    static CURRENT_FILE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+// Only used by the WASI plugin entry point; native callers go through
+// `with_current_file` (scope guard) instead.
+#[cfg(feature = "plugin")]
+fn set_current_file(filename: Option<String>) {
+    CURRENT_FILE.with(|c| *c.borrow_mut() = filename);
+}
+
+/// Scope guard for setting the current filename — useful for native
+/// callers that want filename context in error messages without managing
+/// the thread-local manually.
+pub fn with_current_file<F, R>(filename: Option<String>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = CURRENT_FILE.with(|c| c.borrow_mut().replace(filename.unwrap_or_default()));
+    let result = f();
+    CURRENT_FILE.with(|c| *c.borrow_mut() = prev);
+    result
+}
 
 mod hash;
 mod whitespace;
@@ -40,6 +74,10 @@ pub const DEFAULT_ID_INTERPOLATION_PATTERN: &str = "[sha512:contenthash:base64:6
 /// guarantees execution stops, preferable to emitting and continuing
 /// to produce divergent code in a 90 GB monorepo.
 ///
+/// Includes the filename of the file being transformed (read from the
+/// `CURRENT_FILE` thread-local) — without it, panic messages from a
+/// large CI run are unattributable.
+///
 /// `better_scoped_tls::ScopedKey` (which backs `HANDLER`) only exposes
 /// `with(...)` and panics if no scope is active — i.e. in native unit
 /// tests where the SWC host hasn't installed one. We sidestep that with
@@ -47,12 +85,18 @@ pub const DEFAULT_ID_INTERPOLATION_PATTERN: &str = "[sha512:contenthash:base64:6
 /// clean panic with our error message.
 pub(crate) fn fail(span: Span, message: impl AsRef<str>) -> ! {
     let msg = message.as_ref();
+    let filename =
+        CURRENT_FILE.with(|c| c.borrow().clone()).filter(|s| !s.is_empty());
+    let with_file = match &filename {
+        Some(f) => format!("{} (in {})", msg, f),
+        None => msg.to_string(),
+    };
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         HANDLER.with(|h| {
-            h.struct_span_err(span, msg).emit();
+            h.struct_span_err(span, &with_file).emit();
         });
     }));
-    panic!("swc-plugin-formatjs: {}", msg);
+    panic!("swc-plugin-formatjs: {}", with_file);
 }
 
 /// Mirrors the option surface of `babel-plugin-formatjs@10.5.41`'s `Options`
@@ -803,6 +847,7 @@ fn replace_jsx_attr_value(n: &mut JSXOpeningElement, key: &str, new_value: JSXAt
 #[cfg(feature = "plugin")]
 mod plugin_entry {
     use super::*;
+    use swc_core::plugin::metadata::TransformPluginMetadataContextKind;
     use swc_core::plugin::{metadata::TransformPluginProgramMetadata, plugin_transform};
 
     #[plugin_transform]
@@ -810,6 +855,13 @@ mod plugin_entry {
         mut program: Program,
         metadata: TransformPluginProgramMetadata,
     ) -> Program {
+        // Stash the source file path before parsing config or running the
+        // visitor so any `fail(...)` we hit can include it in the message.
+        // The host hands us a path string here (relative to the project
+        // root) — we just forward it.
+        let filename = metadata.get_context(&TransformPluginMetadataContextKind::Filename);
+        set_current_file(filename);
+
         let raw = metadata
             .get_transform_plugin_config()
             .unwrap_or_else(|| "{}".to_string());
@@ -821,6 +873,12 @@ mod plugin_entry {
             ),
         };
         program.visit_mut_with(&mut FormatJsTransform::new(config));
+
+        // Clear so a subsequent invocation in the same plugin instance
+        // (host reuses instances) can't accidentally attribute its error
+        // to the previous file.
+        set_current_file(None);
+
         program
     }
 }
